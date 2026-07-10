@@ -1,0 +1,25 @@
+<svg width="512" height="512" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- Sfondo arrotondato scuro caldo -->
+  <rect x="4" y="4" width="92" height="92" rx="26" fill="#17141b"/>
+  <rect x="4.75" y="4.75" width="90.5" height="90.5" rx="25.25" fill="none" stroke="#2f2836" stroke-width="1.5"/>
+
+  <!-- Falce: lama piena (filo esterno più scuro) -->
+  <path d="M22 33
+           C40 25 66 27 80 44
+           C82 46.5 82.5 49 81 51
+           C68 39 46 39 31 46
+           C28.5 44 24 37 22 33 Z"
+        fill="#d97b16"/>
+
+  <!-- Lama: filo interno affilato più chiaro (dà profondità) -->
+  <path d="M26 34
+           C42 28 64 30 76 44
+           C63 36 44 37 31 44
+           C29.5 41 27.5 37 26 34 Z"
+        fill="#ffcf5e"/>
+
+  <!-- Manico che scende, curvo -->
+  <path d="M30 45
+           C36 60 46 71 61 78"
+        fill="none" stroke="#c98a2e" stroke-width="7" stroke-linecap="round"/>
+</svg>

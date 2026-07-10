@@ -1,0 +1,50 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- Harvest: file da NON pubblicare mai ---
+
+# Binari dei motori esterni (~140 MB): non sono codice nostro, si scaricano a
+# parte (vedi README). Non vanno versionati.
+src-tauri/binaries/
+
+# Chiavi e segreti (la chiave di firma sta fuori dal progetto, ma per sicurezza)
+*.key
+*.key.pub
+*.pem
+.env
+.env.*
+
+# Artefatti di build e installer
+src-tauri/target/
+src-tauri/gen/
+
+# Anteprime/immagini temporanee generate durante lo sviluppo
+*.tmp.png
+
+# Artefatti test browser
+.playwright-mcp/
+
+# Cache strumenti di sviluppo
+.impeccable/
