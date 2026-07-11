@@ -48,3 +48,6 @@ src-tauri/gen/
 
 # Cache strumenti di sviluppo
 .impeccable/
+
+# Documenti di lavoro interni (roadmap, note): restano in locale
+docs/
