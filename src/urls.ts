@@ -15,6 +15,19 @@ export function findNumbers(url: string): NumberMatch[] {
   return matches;
 }
 
+/**
+ * Tetto ai link generati in una volta. Serve contro gli errori di battitura
+ * (un "fino a 100000" genererebbe centomila schede e bloccherebbe l'app), non
+ * a limitare l'uso reale: 500 download in coda sono già ore di lavoro.
+ */
+export const MAX_SERIES = 500;
+
+/** Quanti link genererebbe questo intervallo (anche se supera il tetto). */
+export function seriesCount(from: number, to: number): number {
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) return 0;
+  return to - from + 1;
+}
+
 export function generateSeriesUrls(
   exampleUrl: string,
   match: NumberMatch,
@@ -23,6 +36,9 @@ export function generateSeriesUrls(
   zeroPad: boolean,
 ): string[] {
   if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) return [];
+  // Oltre il tetto non genero nulla: la UI mostra un avviso al posto
+  // dell'anteprima. Meglio niente che un'app bloccata.
+  if (seriesCount(from, to) > MAX_SERIES) return [];
 
   const before = exampleUrl.slice(0, match.start);
   const after = exampleUrl.slice(match.start + match.text.length);

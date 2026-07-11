@@ -45,24 +45,109 @@ body {
   color: var(--color-accent-ink);
 }
 
-/* Barra di avanzamento indeterminata (nessuna percentuale disponibile) */
-@keyframes bar-slide {
-  from {
-    transform: translateX(-100%);
+/* --- Indicatori di attività "vivi" ---
+   Nota: le animazioni usano solo transform/opacity (compositor-only, 60fps,
+   niente reflow). Con prefers-reduced-motion NON le spegniamo (sembrerebbero
+   bloccate) ma le SOSTITUIAMO con un pulse di opacità meno vestibolare. */
+
+/* Barra indeterminata: usata durante l'analisi (nessuna percentuale nota) */
+.progress-indeterminate {
+  position: relative;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-line);
+}
+.progress-indeterminate::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: inherit;
+  background: var(--color-accent);
+  will-change: transform;
+  animation: indet-slide 1.15s cubic-bezier(0.65, 0.05, 0.36, 1) infinite;
+}
+@keyframes indet-slide {
+  0% {
+    transform: translateX(-120%);
   }
-  to {
-    transform: translateX(300%);
+  100% {
+    transform: translateX(320%);
   }
 }
-.bar-indeterminate {
-  animation: bar-slide 1.4s ease-in-out infinite;
+
+/* Skeleton (placeholder anteprima che carica): sheen che scorre */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--color-line);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-ink) 8%, transparent),
+    transparent
+  );
+  animation: skeleton-sheen 1.5s ease-in-out infinite;
+}
+@keyframes skeleton-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Pallino "vivo" accanto al testo di fase */
+.live-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--color-accent);
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Spegne le animazioni generiche... */
   *,
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+  /* ...ma per gli indicatori di attività sostituisce con un fade lento, così
+     restano chiaramente "vivi" invece di sembrare congelati. */
+  .progress-indeterminate::before,
+  .skeleton::after,
+  .live-dot {
+    animation: reduced-fade 1.6s ease-in-out infinite !important;
+    animation-duration: 1.6s !important;
+    transform: none !important;
+  }
+  .progress-indeterminate::before {
+    width: 100%;
+  }
+  @keyframes reduced-fade {
+    0%,
+    100% {
+      opacity: 0.4;
+    }
+    50% {
+      opacity: 0.9;
+    }
   }
 }
