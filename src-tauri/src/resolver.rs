@@ -62,6 +62,25 @@ pub fn is_direct_image(url: &str) -> bool {
     IMAGE_EXT.iter().any(|e| lower.ends_with(e))
 }
 
+/// Chiave anti-duplicato di un URL. Se il percorso finisce con un'estensione di
+/// file nota (es. /foo.jpg?token=…), la query è quasi sempre un token variabile
+/// e va IGNORATA, così lo stesso file da pagine diverse è riconosciuto uguale.
+/// Se invece il percorso NON ha estensione (es. /img?id=42), la query di solito
+/// IDENTIFICA il file e va TENUTA, per non scartare file diversi come duplicati.
+pub fn dedup_key(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url).to_lowercase();
+    let has_known_ext = VIDEO_EXT
+        .iter()
+        .chain(IMAGE_EXT.iter())
+        .any(|e| path.ends_with(e))
+        || path.ends_with(".mp3");
+    if has_known_ext {
+        path
+    } else {
+        url.to_lowercase()
+    }
+}
+
 /// Elenca TUTTI i link contenuti in una pagina/thread (pagine + file diretti),
 /// deduplicati, usando gallery-dl in modalità "solo elenco" (-g) con il filtro
 /// anti-profilo. Il chiamante li classifica per tipo.
@@ -94,19 +113,96 @@ pub async fn list_thread_links(
         .collect()
 }
 
+/// Client HTTP condiviso per tutti i download di una coda: riusa le connessioni
+/// (keep-alive) invece di rifare l'handshake TLS per ogni file. Da creare una
+/// volta e passare a download_file.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .build()
+        .unwrap_or_default()
+}
+
+/// Oltre questa soglia il file NON viene tenuto in memoria ma scritto a pezzi
+/// mentre arriva. Le immagini stanno abbondantemente sotto (e per loro il
+/// contenuto in RAM serve alla deduplica); un video diretto da un forum può
+/// pesare centinaia di MB e, con 4 download in parallelo più la copia per la
+/// dedup, farebbe esplodere la memoria.
+const MAX_IN_MEMORY: usize = 32 * 1024 * 1024; // 32 MB
+
+/// Nome file sicuro su Windows, ricavato dall'URL.
+/// Sostituisce i caratteri vietati (`\ / : * ? " < > |`, come `make_dir`) e
+/// tronca i nomi assurdamente lunghi mantenendo l'estensione: senza, la
+/// scrittura fallirebbe in silenzio e il file andrebbe perso.
+fn safe_file_name(url: &str) -> String {
+    let raw = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("");
+    // Percent-decoding minimo dei casi comuni (%20 = spazio)
+    let raw = raw.replace("%20", " ");
+    let cleaned: String = raw
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if (c as u32) < 0x20 => '_', // caratteri di controllo
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_end_matches('.').to_string();
+    if cleaned.is_empty() {
+        return "file".into();
+    }
+    // Windows: 255 caratteri per componente del percorso. Tronco il corpo,
+    // non l'estensione (che serve a riconoscere il tipo di file).
+    const MAX_LEN: usize = 120;
+    if cleaned.chars().count() <= MAX_LEN {
+        return cleaned;
+    }
+    let (stem, ext) = match cleaned.rsplit_once('.') {
+        Some((s, e)) if e.len() <= 8 => (s, format!(".{e}")),
+        _ => (cleaned.as_str(), String::new()),
+    };
+    let keep = MAX_LEN.saturating_sub(ext.chars().count());
+    let stem: String = stem.chars().take(keep).collect();
+    format!("{stem}{ext}")
+}
+
+/// Percorso libero: se il nome è già occupato da un ALTRO file, aggiunge un
+/// contatore — `foto.jpg` → `foto (2).jpg` — come fa Windows. Prima il file
+/// veniva sovrascritto in silenzio: due immagini diverse con lo stesso nome
+/// (capita spesso nei thread) e la seconda cancellava la prima.
+fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s, format!(".{e}")),
+        None => (name, String::new()),
+    };
+    for n in 2..1000 {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    first
+}
+
 /// Scarica un file diretto (già risolto) via HTTP in `output_dir`.
 /// Se `dedup` è dato, scarta i file duplicati (identici o percettivamente uguali).
 /// Restituisce true se il file è stato effettivamente salvato.
 pub async fn download_file(
+    client: &reqwest::Client,
     url: &str,
     output_dir: &str,
     subdir: &str,
     dedup: Option<&crate::dedup::Dedup>,
 ) -> bool {
-    let client = match reqwest::Client::builder().user_agent("Mozilla/5.0").build() {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
     // Backoff sul 429 (troppe richieste): riprova qualche volta con attesa
     // crescente invece di scartare subito il file.
     let mut resp = None;
@@ -123,30 +219,8 @@ pub async fn download_file(
             _ => return false,
         }
     }
-    let Some(resp) = resp else { return false };
+    let Some(mut resp) = resp else { return false };
 
-    // Scarica in memoria (i file media sono piccoli): serve il contenuto completo
-    // per la deduplica prima di scriverlo su disco.
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    // Deduplica: se è un doppione (esatto o percettivo), non lo salviamo.
-    if let Some(d) = dedup {
-        if !d.keep(&bytes) {
-            return false;
-        }
-    }
-
-    // Nome file dall'URL. subdir vuoto = direttamente nella cartella scelta.
-    let name = url
-        .rsplit('/')
-        .next()
-        .unwrap_or("file")
-        .split('?')
-        .next()
-        .unwrap_or("file");
     let dir = if subdir.is_empty() {
         Path::new(output_dir).to_path_buf()
     } else {
@@ -155,8 +229,112 @@ pub async fn download_file(
     if std::fs::create_dir_all(&dir).is_err() {
         return false;
     }
-    let path = dir.join(name);
+    let name = safe_file_name(url);
 
+    // Accumulo in memoria SOLO finché resto sotto la soglia: appena la supero
+    // (o se il server dichiara subito un file grosso) passo alla scrittura a
+    // pezzi su disco. Così un video da centinaia di MB non entra mai tutto in
+    // RAM — con 4 download in parallelo sarebbe un disastro. Nota: non mi fido
+    // del solo content-length, che può mancare; il controllo è sui byte veri.
+    let declared_big = resp
+        .content_length()
+        .is_some_and(|len| len as usize > MAX_IN_MEMORY);
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut streaming: Option<(std::fs::File, std::path::PathBuf)> = None;
+    // Impronta esatta calcolata mentre il file scorre: così anche un file
+    // grosso, che non passa mai intero per la memoria, resta deduplicabile.
+    let mut hasher = crate::dedup::Fnv::default();
+    if declared_big {
+        let path = unique_path(&dir, &name);
+        let Ok(file) = std::fs::File::create(&path) else {
+            return false;
+        };
+        streaming = Some((file, path));
+    }
+
+    use std::io::Write;
+    loop {
+        let chunk = match resp.chunk().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(_) => {
+                // Scaricamento interrotto: niente file monchi in giro
+                if let Some((_, path)) = &streaming {
+                    let _ = std::fs::remove_file(path);
+                }
+                return false;
+            }
+        };
+        match &mut streaming {
+            Some((file, path)) => {
+                hasher.update(&chunk);
+                if file.write_all(&chunk).is_err() {
+                    // Scrittura fallita (tipicamente disco pieno)
+                    let _ = std::fs::remove_file(path);
+                    return false;
+                }
+            }
+            None => {
+                buf.extend_from_slice(&chunk);
+                // Superata la soglia: travaso su disco e proseguo in streaming
+                if buf.len() > MAX_IN_MEMORY {
+                    let path = unique_path(&dir, &name);
+                    let Ok(mut file) = std::fs::File::create(&path) else {
+                        return false;
+                    };
+                    if file.write_all(&buf).is_err() {
+                        let _ = std::fs::remove_file(&path);
+                        return false;
+                    }
+                    hasher.update(&buf); // anche i byte già accumulati contano
+                    buf = Vec::new(); // libero subito la memoria
+                    streaming = Some((file, path));
+                }
+            }
+        }
+    }
+
+    // Via streaming (file grosso, tipicamente un video): è già su disco.
+    // Il controllo dei doppioni avviene ORA, con l'impronta calcolata strada
+    // facendo: se l'abbiamo già scaricato in questa coda, il file va via.
+    // Solo uguaglianza esatta — il confronto percettivo guarda le immagini,
+    // su un video non avrebbe senso.
+    if let Some((mut file, path)) = streaming {
+        if file.flush().is_err() {
+            let _ = std::fs::remove_file(&path);
+            return false;
+        }
+        drop(file); // chiudo prima di poterlo eventualmente cancellare
+        if let Some(d) = dedup {
+            if !d.keep_exact(hasher.finish()) {
+                let _ = std::fs::remove_file(&path);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // File piccolo (immagini): il contenuto è in memoria, serve alla deduplica.
+    let bytes = buf;
+
+    // Deduplica: se è un doppione (esatto o percettivo), non lo salviamo.
+    // keep() decodifica l'immagine e calcola l'hash percettivo: lavoro CPU
+    // pesante che bloccherebbe il runtime async e serializzerebbe i download
+    // paralleli. Lo eseguiamo su spawn_blocking (thread pool dedicato) così gli
+    // altri download continuano mentre questo viene deduplicato.
+    if let Some(d) = dedup {
+        let d = d.clone();
+        let bytes_owned = bytes.clone();
+        let keep = tokio::task::spawn_blocking(move || d.keep(&bytes_owned))
+            .await
+            .unwrap_or(true);
+        if !keep {
+            return false;
+        }
+    }
+
+    let path = unique_path(&dir, &name);
     std::fs::write(&path, &bytes).is_ok()
 }
 
@@ -203,14 +381,16 @@ fn extractor_js(want: Want) -> String {
         }}
         return best;
       }}
+      // Tick a 150ms: reagisce prima sulle pagine veloci (la maggioranza). Il
+      // limite di tentativi tiene la stessa pazienza totale (~10s) sulle lente.
       const timer = setInterval(() => {{
         tries++;
         let url = null;
         if (WANT_VIDEO) url = findVideo();
         if (!url && WANT_IMAGE) url = findImage();
         if (url) {{ clearInterval(timer); location.hash = 'SCRAPER_RESULT=' + encodeURIComponent(url); }}
-        else if (tries > 50) {{ clearInterval(timer); location.hash = 'SCRAPER_RESULT=NULL'; }}
-      }}, 200);
+        else if (tries > 66) {{ clearInterval(timer); location.hash = 'SCRAPER_RESULT=NULL'; }}
+      }}, 150);
     }})();
     "#
     )
@@ -288,10 +468,11 @@ pub async fn resolve(app: &AppHandle, page_url: &str, _id: usize, want: Want) ->
     make_non_activating(&window);
     let _ = window.show();
 
-    // Polling sull'hash: max ~14s (le pagine JS possono metterci qualche secondo)
+    // Polling sull'hash a 150ms: legge il risultato prima appena il JS lo scrive.
+    // 90 tentativi × 150ms ≈ 13,5s max, in linea con la pazienza precedente.
     let mut result = None;
-    for _ in 0..70 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..90 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
         if let Ok(u) = window.url() {
             if let Some(rest) = u.fragment().and_then(|f| f.strip_prefix("SCRAPER_RESULT=")) {
                 let decoded = percent_decode(rest);
@@ -308,3 +489,5 @@ pub async fn resolve(app: &AppHandle, page_url: &str, _id: usize, want: Want) ->
     tokio::time::sleep(Duration::from_millis(150)).await;
     result
 }
+
+
